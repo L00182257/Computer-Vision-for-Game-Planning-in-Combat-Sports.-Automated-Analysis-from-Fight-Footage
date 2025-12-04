@@ -3,3 +3,5 @@ opencv
 numpy
 pandas
 prefixspan
+matplotlib
+scikit-learn
