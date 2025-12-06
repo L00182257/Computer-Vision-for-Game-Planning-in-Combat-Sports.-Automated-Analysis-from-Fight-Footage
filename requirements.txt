@@ -1,7 +1,6 @@
-python = 3.10+
-opencv
 numpy
+opencv-python
 pandas
-prefixspan
 matplotlib
+prefixspan-python
 scikit-learn
