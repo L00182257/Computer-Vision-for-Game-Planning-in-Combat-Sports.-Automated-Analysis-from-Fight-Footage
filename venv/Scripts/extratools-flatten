@@ -1,0 +1,18 @@
+#!C:\Users\noahr\Downloads - Copy\Downloads\Computer Vision for Game-Planning in Combat Sports. Automated Analysis from Fight Footage\venv\Scripts\python.exe
+
+"""
+Usage:
+    extratools-flatten [--force]
+"""
+
+import sys
+import json
+
+from docopt import docopt
+from extratools.jsontools import flatten
+
+argv = docopt(__doc__)
+force = argv["--force"]
+
+data = json.load(sys.stdin)
+json.dump(flatten(data, force=force), sys.stdout)

@@ -2,5 +2,5 @@ numpy
 opencv-python
 pandas
 matplotlib
-prefixspan-python
+prefixspan
 scikit-learn
