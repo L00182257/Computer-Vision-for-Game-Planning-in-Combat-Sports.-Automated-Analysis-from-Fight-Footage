@@ -4,3 +4,4 @@ pandas
 matplotlib
 prefixspan
 scikit-learn
+mediapipe
