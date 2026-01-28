@@ -1,15 +1,66 @@
-# Python cache
+# =========================
+# Python virtual environment
+# =========================
+venv/
+.env/
+.venv/
+
+# =========================
+# Python cache & build files
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
 
-# VS Code settings
+# =========================
+# Jupyter / Python tooling
+# =========================
+.ipynb_checkpoints/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# VS Code
+# =========================
 .vscode/
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
 
-# OS files
+# =========================
+# OS-specific files
+# =========================
 .DS_Store
 Thumbs.db
+desktop.ini
 
-#virtual enviorment
-venv310/
+# =========================
+# Logs & temp files
+# =========================
+*.log
+*.tmp
+*.bak
 
-data/
+# =========================
+# Media & generated data
+# =========================
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# =========================
+# Model weights & caches
+# =========================
+*.pt
+*.onnx
+*.engine
+.cache/
+ultralytics/

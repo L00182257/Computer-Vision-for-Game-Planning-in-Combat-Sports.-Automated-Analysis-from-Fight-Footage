@@ -1,7 +1,18 @@
-numpy
-opencv-python
-pandas
-matplotlib
-prefixspan
-scikit-learn
-mediapipe
+# Core numerical & utility libraries
+numpy>=1.23
+pillow>=9.0
+
+# Computer vision
+opencv-python>=4.8
+
+# Deep learning & detection
+torch>=2.0
+torchvision>=0.15
+torchaudio>=2.0
+ultralytics>=8.0
+
+# Pose estimation
+mediapipe>=0.10
+
+# Pattern mining
+prefixspan>=0.5
