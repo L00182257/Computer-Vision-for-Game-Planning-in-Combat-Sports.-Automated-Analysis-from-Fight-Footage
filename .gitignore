@@ -1,13 +1,9 @@
-# =========================
 # Python virtual environment
-# =========================
 venv/
 .env/
 .venv/
 
-# =========================
 # Python cache & build files
-# =========================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -17,48 +13,36 @@ __pycache__/
 build/
 dist/
 
-# =========================
 # Jupyter / Python tooling
-# =========================
 .ipynb_checkpoints/
 .mypy_cache/
 .pytest_cache/
 .coverage
 htmlcov/
 
-# =========================
 # VS Code
-# =========================
 .vscode/
 !.vscode/settings.json
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# =========================
 # OS-specific files
-# =========================
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# =========================
 # Logs & temp files
-# =========================
 *.log
 *.tmp
 *.bak
 
-# =========================
 # Media & generated data
-# =========================
 *.mp4
 *.avi
 *.mov
 *.mkv
 
-# =========================
 # Model weights & caches
-# =========================
 *.pt
 *.onnx
 *.engine
