@@ -8,20 +8,21 @@ from ultralytics import YOLO
 
 from src.detection.filtering.fighter_filtering import FighterFilter
 from src.identity.fighter_identity import FighterIdentity
+from src.events.defence_detector import DefenceDetector
 
 
 COLOUR_PALETTE = {
-    "Red": (0, 200, 200),
-    "Blue": (110, 200, 200),
-    "Green": (60, 200, 200),
-    "Yellow": (30, 200, 200),
-    "Orange": (15, 200, 200),
-    "Purple": (140, 200, 200),
-    "Pink": (165, 200, 200),
-    "White": (0, 0, 255),
-    "Black": (0, 0, 30),
-    "Grey": (0, 0, 120),
-    "Brown": (20, 150, 150),
+    "Red": (0,200,200),
+    "Blue": (110,200,200),
+    "Green": (60,200,200),
+    "Yellow": (30,200,200),
+    "Orange": (15,200,200),
+    "Purple": (140,200,200),
+    "Pink": (165,200,200),
+    "White": (0,0,255),
+    "Black": (0,0,30),
+    "Grey": (0,0,120),
+    "Brown": (20,150,150),
 }
 
 
@@ -30,8 +31,8 @@ class CombatVisionGUI:
     def __init__(self):
 
         self.root = tk.Tk()
-        self.root.title("Combat Vision System - GPU Pose")
-        self.root.geometry("1150x750")
+        self.root.title("Combat Vision System")
+        self.root.geometry("1200x760")
 
         self.video_path = None
         self.cap = None
@@ -41,15 +42,18 @@ class CombatVisionGUI:
         self.processing_enabled = False
 
         self.playback_speed = 1.0
+
         self.identity_assigner = None
+        self.defence_detector = DefenceDetector()
 
         self.loop_thread = None
 
         self._build_layout()
+
         self.root.mainloop()
 
     # --------------------------------------------------
-    # GUI
+    # GUI LAYOUT
     # --------------------------------------------------
 
     def _build_layout(self):
@@ -67,11 +71,13 @@ class CombatVisionGUI:
         self.canvas.pack(fill="both", expand=True)
 
         ttk.Button(controls, text="Load Video", command=self._load_video).pack(pady=5)
+
         ttk.Button(controls, text="Play", command=self._play).pack(pady=5)
         ttk.Button(controls, text="Pause", command=self._pause).pack(pady=5)
         ttk.Button(controls, text="Stop", command=self._stop).pack(pady=5)
 
-        ttk.Label(controls, text="Playback Speed").pack()
+        ttk.Label(controls, text="Playback Speed").pack(pady=4)
+
         self.speed_slider = tk.Scale(
             controls,
             from_=0.25,
@@ -80,6 +86,7 @@ class CombatVisionGUI:
             orient="horizontal",
             command=self._set_speed
         )
+
         self.speed_slider.set(1.0)
         self.speed_slider.pack()
 
@@ -105,14 +112,16 @@ class CombatVisionGUI:
             controls,
             text="Enable Identity",
             command=self._enable_processing
-        ).pack(pady=5)
+        ).pack(pady=6)
 
+    # --------------------------------------------------
+    # VIDEO LOADING
     # --------------------------------------------------
 
     def _load_video(self):
 
         path = filedialog.askopenfilename(
-            filetypes=[("Video Files", "*.mp4 *.avi *.mov *.mkv")]
+            filetypes=[("Video Files","*.mp4 *.avi *.mov *.mkv")]
         )
 
         if not path:
@@ -128,6 +137,7 @@ class CombatVisionGUI:
             return
 
         ret, frame = self.cap.read()
+
         if ret:
             self._update_canvas(frame)
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -142,8 +152,11 @@ class CombatVisionGUI:
             target=self._video_loop,
             daemon=True
         )
+
         self.loop_thread.start()
 
+    # --------------------------------------------------
+    # PLAYBACK CONTROLS
     # --------------------------------------------------
 
     def _play(self):
@@ -154,8 +167,10 @@ class CombatVisionGUI:
         self.paused = True
 
     def _stop(self):
+
         self.running = False
         self.paused = True
+
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -163,6 +178,8 @@ class CombatVisionGUI:
     def _set_speed(self, value):
         self.playback_speed = float(value)
 
+    # --------------------------------------------------
+    # ENABLE PROCESSING
     # --------------------------------------------------
 
     def _enable_processing(self):
@@ -174,17 +191,23 @@ class CombatVisionGUI:
         fighter_a = COLOUR_PALETTE[self.combo_a.get()]
         fighter_b = COLOUR_PALETTE[self.combo_b.get()]
 
-        self.identity_assigner = FighterIdentity(fighter_a, fighter_b)
+        self.identity_assigner = FighterIdentity(
+            fighter_a,
+            fighter_b
+        )
+
         self.processing_enabled = True
 
+        print("Identity enabled.")
+
     # --------------------------------------------------
-    # GPU POSE LOOP
+    # MAIN VIDEO LOOP
     # --------------------------------------------------
 
     def _video_loop(self):
 
-        # Pose model
         model = YOLO("yolov8n-pose.pt")
+
         filterer = FighterFilter(min_area_ratio=0.02)
 
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
@@ -196,6 +219,7 @@ class CombatVisionGUI:
                 continue
 
             ret, frame = self.cap.read()
+
             if not ret:
                 break
 
@@ -203,7 +227,7 @@ class CombatVisionGUI:
 
                 results = model.track(
                     source=frame,
-                    device=0,  # GPU
+                    device=0,
                     persist=True,
                     conf=0.4,
                     verbose=False
@@ -226,41 +250,101 @@ class CombatVisionGUI:
                         track_ids
                     )
 
-                    # Draw results
-                    for i, (box, identity) in enumerate(zip(boxes, identities)):
+                    for i,(box,identity) in enumerate(zip(boxes,identities)):
 
-                        x1, y1, x2, y2 = map(int, box)
+                        x1,y1,x2,y2 = map(int,box)
 
-                        color = (0, 255, 255)
+                        color = (0,255,255)
+                        label = "Unknown"
+
                         if identity == "A":
-                            color = (0, 0, 255)
+                            color = (0,0,255)
+                            label = "Fighter A"
+
                         elif identity == "B":
-                            color = (255, 0, 0)
+                            color = (255,0,0)
+                            label = "Fighter B"
 
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        # draw box
+                        cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
 
+                        cv2.putText(
+                            frame,
+                            label,
+                            (x1,max(20,y1-10)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            color,
+                            2
+                        )
+
+                        # pose drawing
                         if results.keypoints is not None:
+
                             kpts = results.keypoints.xy[i].cpu().numpy()
+
                             for kp in kpts:
-                                cv2.circle(frame, (int(kp[0]), int(kp[1])), 3, (0,255,0), -1)
+                                cv2.circle(
+                                    frame,
+                                    (int(kp[0]),int(kp[1])),
+                                    3,
+                                    (0,255,0),
+                                    -1
+                                )
+
+                            event = self.defence_detector.detect(
+                                kpts,
+                                identity
+                            )
+
+                            # DUCK VISUALIZATION
+                            if event == "Duck":
+
+                                cv2.rectangle(
+                                    frame,
+                                    (x1,y1),
+                                    (x2,y2),
+                                    (0,255,255),
+                                    4
+                                )
+
+                                cv2.putText(
+                                    frame,
+                                    "DUCK",
+                                    (x1,y1-40),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    1.0,
+                                    (0,255,255),
+                                    3
+                                )
 
             self._update_canvas(frame)
-            time.sleep(1.0 / (fps * self.playback_speed))
+
+            time.sleep(1.0/(fps*self.playback_speed))
 
         self.running = False
 
     # --------------------------------------------------
+    # CANVAS UPDATE
+    # --------------------------------------------------
 
-    def _update_canvas(self, frame):
+    def _update_canvas(self,frame):
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+
         img = Image.fromarray(frame)
 
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
 
-        if w > 0 and h > 0:
-            img = img.resize((w, h))
+        if w>0 and h>0:
+            img = img.resize((w,h))
 
         self.photo = ImageTk.PhotoImage(img)
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+        self.canvas.create_image(
+            0,
+            0,
+            anchor="nw",
+            image=self.photo
+        )
