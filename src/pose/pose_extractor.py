@@ -6,69 +6,72 @@ class PoseExtractor:
 
     def __init__(self):
 
-        # YOLO pose model
+        # Pose model
         self.model = YOLO("yolov8n-pose.pt")
 
-        # Pose memory per track
+        # Last known pose for each track
         self.pose_memory = {}
-
-
-    def _iou(self, boxA, boxB):
-
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
-
-        interArea = max(0, xB - xA) * max(0, yB - yA)
-
-        boxAArea = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
-        boxBArea = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
-
-        if boxAArea == 0 or boxBArea == 0:
-            return 0
-
-        return interArea / float(boxAArea + boxBArea - interArea)
 
 
     def extract(self, frame, boxes, track_ids):
 
-        """
-        Returns poses aligned to each track_id
-        """
+        poses_for_tracks = {}
 
-        poses_for_tracks = {tid: None for tid in track_ids}
+        for box, tid in zip(boxes, track_ids):
 
-        results = self.model(frame, verbose=False)[0]
+            x1, y1, x2, y2 = map(int, box)
 
-        if results.keypoints is None:
-            return poses_for_tracks
+            h, w = frame.shape[:2]
 
+            # Clamp bounds
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w, x2)
+            y2 = min(h, y2)
 
-        pose_boxes = results.boxes.xyxy.cpu().numpy()
-        pose_kpts = results.keypoints.xy.cpu().numpy()
+            roi = frame[y1:y2, x1:x2]
 
+            if roi.size == 0:
+                poses_for_tracks[tid] = None
+                continue
 
-        for track_box, tid in zip(boxes, track_ids):
+            results = self.model(
+                roi,
+                verbose=False,
+                device=0
+            )[0]
 
-            best_iou = 0
-            best_pose = None
+            if results.keypoints is None:
 
-            for pbox, pkpt in zip(pose_boxes, pose_kpts):
-
-                iou = self._iou(track_box, pbox)
-
-                if iou > best_iou:
-                    best_iou = iou
-                    best_pose = pkpt
-
-            if best_iou > 0.2:
-                poses_for_tracks[tid] = best_pose
-                self.pose_memory[tid] = best_pose
-
-            else:
-                # fallback to last known pose if occluded
+                # fallback to last pose
                 if tid in self.pose_memory:
                     poses_for_tracks[tid] = self.pose_memory[tid]
+                else:
+                    poses_for_tracks[tid] = None
+
+                continue
+
+
+            kpts = results.keypoints.xy.cpu().numpy()
+
+            if len(kpts) == 0:
+
+                if tid in self.pose_memory:
+                    poses_for_tracks[tid] = self.pose_memory[tid]
+                else:
+                    poses_for_tracks[tid] = None
+
+                continue
+
+
+            pose = kpts[0]
+
+            # Convert ROI coordinates → frame coordinates
+            pose[:, 0] += x1
+            pose[:, 1] += y1
+
+            poses_for_tracks[tid] = pose
+
+            self.pose_memory[tid] = pose
 
         return poses_for_tracks

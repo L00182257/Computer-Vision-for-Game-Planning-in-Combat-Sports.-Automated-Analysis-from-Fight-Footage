@@ -6,52 +6,23 @@ class DefenceDetector:
 
     def __init__(self):
 
-        # Duck thresholds
-        self.head_drop_threshold = 1.8
-        self.torso_angle_threshold = 30
+        # --- thresholds ---
+        self.duck_ratio = 1.6
+        self.slip_threshold = 0.18
+        self.pull_threshold = 0.15
 
-        # Frames required to confirm duck
+        # frames required to confirm
         self.required_frames = 4
 
-        # EMA smoothing strength
-        self.smoothing_alpha = 0.6
+        # cooldown to prevent spam
+        self.cooldown_frames = 12
 
-        # Pose smoothing buffers
-        self.smoothed_pose = {
-            "A": None,
-            "B": None
-        }
+        # fighter state
+        self.counters = {"A":0, "B":0}
+        self.cooldowns = {"A":0, "B":0}
 
-        # Previous head positions for velocity check
-        self.prev_head_y = {
-            "A": None,
-            "B": None
-        }
-
-        self.counter = {
-            "A": 0,
-            "B": 0
-        }
-
-
-    def _smooth_pose(self, keypoints, fighter_id):
-
-        keypoints = np.array(keypoints[:, :2], dtype=np.float32)
-
-        if self.smoothed_pose[fighter_id] is None:
-            self.smoothed_pose[fighter_id] = keypoints
-            return keypoints
-
-        prev = self.smoothed_pose[fighter_id]
-
-        smoothed = (
-            self.smoothing_alpha * keypoints +
-            (1 - self.smoothing_alpha) * prev
-        )
-
-        self.smoothed_pose[fighter_id] = smoothed
-
-        return smoothed
+        # previous head positions
+        self.prev_head = {"A":None, "B":None}
 
 
     def detect(self, keypoints, fighter_id):
@@ -60,8 +31,9 @@ class DefenceDetector:
             return None
 
 
-        keypoints = self._smooth_pose(keypoints, fighter_id)
-
+        # -------------------------------------------------
+        # Keypoints
+        # -------------------------------------------------
 
         nose = keypoints[0]
 
@@ -74,6 +46,9 @@ class DefenceDetector:
         l_knee = keypoints[13]
         r_knee = keypoints[14]
 
+        l_wrist = keypoints[9]
+        r_wrist = keypoints[10]
+
 
         shoulder_mid = (l_shoulder + r_shoulder) / 2
         hip_mid = (l_hip + r_hip) / 2
@@ -82,58 +57,121 @@ class DefenceDetector:
 
         torso_height = hip_mid[1] - shoulder_mid[1]
 
-        if torso_height < 15:
+        if torso_height < 10:
             return None
 
+
+        # -------------------------------------------------
+        # Metrics
+        # -------------------------------------------------
 
         head_to_knee = knee_mid[1] - nose[1]
         ratio = head_to_knee / torso_height
 
-
         torso_vec = hip_mid - shoulder_mid
 
-        angle = abs(math.degrees(
+        torso_angle = abs(math.degrees(
             math.atan2(torso_vec[0], torso_vec[1])
         ))
 
+        head_offset = (nose[0] - shoulder_mid[0]) / torso_height
 
-        # Head velocity check
+        # head movement
         velocity = 0
 
-        if self.prev_head_y[fighter_id] is not None:
-            velocity = nose[1] - self.prev_head_y[fighter_id]
+        if self.prev_head[fighter_id] is not None:
+            velocity = nose[1] - self.prev_head[fighter_id]
 
-        self.prev_head_y[fighter_id] = nose[1]
+        self.prev_head[fighter_id] = nose[1]
 
 
         print(
-            "DuckRatio:", round(ratio, 2),
-            "TorsoAngle:", round(angle, 1),
-            "HeadVel:", round(velocity, 2)
+            "ratio:", round(ratio,2),
+            "angle:", round(torso_angle,1),
+            "offset:", round(head_offset,2),
+            "vel:", round(velocity,2)
         )
 
 
-        duck_detected = False
+        # -------------------------------------------------
+        # Cooldown
+        # -------------------------------------------------
+
+        if self.cooldowns[fighter_id] > 0:
+            self.cooldowns[fighter_id] -= 1
+            return None
 
 
-        # Geometry condition
-        if ratio < self.head_drop_threshold or angle > self.torso_angle_threshold:
-
-            # Must also be moving downward
-            if velocity > 0.5:
-                duck_detected = True
+        event = None
 
 
-        if duck_detected:
+        # -------------------------------------------------
+        # Duck
+        # -------------------------------------------------
 
-            self.counter[fighter_id] += 1
+        if ratio < self.duck_ratio and torso_angle > 30 and velocity > 2:
+            event = "Duck"
 
-            if self.counter[fighter_id] >= self.required_frames:
-                return "Duck"
+
+        # -------------------------------------------------
+        # Slip Left / Right
+        # -------------------------------------------------
+
+        elif head_offset < -self.slip_threshold:
+            event = "Slip Left"
+
+        elif head_offset > self.slip_threshold:
+            event = "Slip Right"
+
+
+        # -------------------------------------------------
+        # Pull
+        # -------------------------------------------------
+
+        elif velocity < -self.pull_threshold * torso_height:
+            event = "Pull"
+
+
+        # -------------------------------------------------
+        # High Block
+        # -------------------------------------------------
+
+        elif (
+            l_wrist[1] < nose[1] and
+            r_wrist[1] < nose[1]
+        ):
+            event = "Block High"
+
+
+        # -------------------------------------------------
+        # Low Block
+        # -------------------------------------------------
+
+        elif (
+            l_wrist[1] > shoulder_mid[1] and
+            r_wrist[1] > shoulder_mid[1]
+        ):
+            event = "Block Low"
+
+
+        # -------------------------------------------------
+        # Temporal confirmation
+        # -------------------------------------------------
+
+        if event:
+
+            self.counters[fighter_id] += 1
+
+            if self.counters[fighter_id] >= self.required_frames:
+
+                self.counters[fighter_id] = 0
+                self.cooldowns[fighter_id] = self.cooldown_frames
+
+                return event
 
         else:
 
-            self.counter[fighter_id] = 0
+            self.counters[fighter_id] = 0
 
 
         return None
