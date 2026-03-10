@@ -1,13 +1,16 @@
 import cv2
-import threading
 import time
+import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
+import numpy as np
+
 from ultralytics import YOLO
 
 from src.detection.filtering.fighter_filtering import FighterFilter
 from src.identity.fighter_identity import FighterIdentity
+from src.pose.pose_extractor import PoseExtractor
 from src.events.defence_detector import DefenceDetector
 
 
@@ -22,7 +25,6 @@ COLOUR_PALETTE = {
     "White": (0,0,255),
     "Black": (0,0,30),
     "Grey": (0,0,120),
-    "Brown": (20,150,150),
 }
 
 
@@ -32,7 +34,7 @@ class CombatVisionGUI:
 
         self.root = tk.Tk()
         self.root.title("Combat Vision System")
-        self.root.geometry("1200x760")
+        self.root.geometry("1300x780")
 
         self.video_path = None
         self.cap = None
@@ -43,17 +45,18 @@ class CombatVisionGUI:
 
         self.playback_speed = 1.0
 
-        self.identity_assigner = None
+        self.detector = YOLO("yolov8n.pt")
+
+        self.filterer = FighterFilter()
+        self.pose_extractor = PoseExtractor()
         self.defence_detector = DefenceDetector()
 
-        self.loop_thread = None
+        self.identity_assigner = None
 
         self._build_layout()
 
         self.root.mainloop()
 
-    # --------------------------------------------------
-    # GUI LAYOUT
     # --------------------------------------------------
 
     def _build_layout(self):
@@ -64,10 +67,10 @@ class CombatVisionGUI:
         controls = ttk.Frame(main, width=320)
         controls.pack(side="left", fill="y", padx=10, pady=10)
 
-        video_area = ttk.Frame(main)
-        video_area.pack(side="right", fill="both", expand=True)
+        video_frame = ttk.Frame(main)
+        video_frame.pack(side="right", fill="both", expand=True)
 
-        self.canvas = tk.Canvas(video_area, bg="black")
+        self.canvas = tk.Canvas(video_frame, bg="black")
         self.canvas.pack(fill="both", expand=True)
 
         ttk.Button(controls, text="Load Video", command=self._load_video).pack(pady=5)
@@ -86,7 +89,6 @@ class CombatVisionGUI:
             orient="horizontal",
             command=self._set_speed
         )
-
         self.speed_slider.set(1.0)
         self.speed_slider.pack()
 
@@ -114,8 +116,6 @@ class CombatVisionGUI:
             command=self._enable_processing
         ).pack(pady=6)
 
-    # --------------------------------------------------
-    # VIDEO LOADING
     # --------------------------------------------------
 
     def _load_video(self):
@@ -148,15 +148,11 @@ class CombatVisionGUI:
         self.running = True
         self.paused = True
 
-        self.loop_thread = threading.Thread(
+        threading.Thread(
             target=self._video_loop,
             daemon=True
-        )
+        ).start()
 
-        self.loop_thread.start()
-
-    # --------------------------------------------------
-    # PLAYBACK CONTROLS
     # --------------------------------------------------
 
     def _play(self):
@@ -179,8 +175,6 @@ class CombatVisionGUI:
         self.playback_speed = float(value)
 
     # --------------------------------------------------
-    # ENABLE PROCESSING
-    # --------------------------------------------------
 
     def _enable_processing(self):
 
@@ -201,14 +195,8 @@ class CombatVisionGUI:
         print("Identity enabled.")
 
     # --------------------------------------------------
-    # MAIN VIDEO LOOP
-    # --------------------------------------------------
 
     def _video_loop(self):
-
-        model = YOLO("yolov8n-pose.pt")
-
-        filterer = FighterFilter(min_area_ratio=0.02)
 
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
 
@@ -225,11 +213,11 @@ class CombatVisionGUI:
 
             if self.processing_enabled:
 
-                results = model.track(
+                results = self.detector.track(
                     source=frame,
-                    device=0,
                     persist=True,
                     conf=0.4,
+                    device=0,
                     verbose=False
                 )[0]
 
@@ -238,7 +226,7 @@ class CombatVisionGUI:
                     boxes = results.boxes.xyxy.cpu().numpy()
                     track_ids = results.boxes.id.cpu().numpy().astype(int)
 
-                    boxes, track_ids = filterer.filter(
+                    boxes, track_ids = self.filterer.filter(
                         boxes,
                         track_ids,
                         frame.shape
@@ -250,7 +238,13 @@ class CombatVisionGUI:
                         track_ids
                     )
 
-                    for i,(box,identity) in enumerate(zip(boxes,identities)):
+                    poses = self.pose_extractor.extract(
+                        frame,
+                        boxes,
+                        track_ids
+                    )
+
+                    for box, tid, identity in zip(boxes, track_ids, identities):
 
                         x1,y1,x2,y2 = map(int,box)
 
@@ -265,7 +259,6 @@ class CombatVisionGUI:
                             color = (255,0,0)
                             label = "Fighter B"
 
-                        # draw box
                         cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
 
                         cv2.putText(
@@ -278,12 +271,11 @@ class CombatVisionGUI:
                             2
                         )
 
-                        # pose drawing
-                        if results.keypoints is not None:
+                        pose = poses.get(tid)
 
-                            kpts = results.keypoints.xy[i].cpu().numpy()
+                        if pose is not None and identity is not None:
 
-                            for kp in kpts:
+                            for kp in pose:
                                 cv2.circle(
                                     frame,
                                     (int(kp[0]),int(kp[1])),
@@ -293,11 +285,10 @@ class CombatVisionGUI:
                                 )
 
                             event = self.defence_detector.detect(
-                                kpts,
+                                pose,
                                 identity
                             )
 
-                            # DUCK VISUALIZATION
                             if event == "Duck":
 
                                 cv2.rectangle(
@@ -324,8 +315,6 @@ class CombatVisionGUI:
 
         self.running = False
 
-    # --------------------------------------------------
-    # CANVAS UPDATE
     # --------------------------------------------------
 
     def _update_canvas(self,frame):
