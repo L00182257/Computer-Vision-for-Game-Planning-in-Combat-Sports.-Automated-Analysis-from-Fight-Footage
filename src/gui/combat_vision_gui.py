@@ -1,9 +1,8 @@
 import cv2
-import time
-import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
+import time
 import numpy as np
 
 from ultralytics import YOLO
@@ -12,6 +11,7 @@ from src.detection.filtering.fighter_filtering import FighterFilter
 from src.identity.fighter_identity import FighterIdentity
 from src.pose.pose_extractor import PoseExtractor
 from src.events.defence_detector import DefenceDetector
+from src.events.event_logger import EventLogger
 
 
 COLOUR_PALETTE = {
@@ -33,14 +33,14 @@ class CombatVisionGUI:
     def __init__(self):
 
         self.root = tk.Tk()
-        self.root.title("Combat Vision System")
-        self.root.geometry("1300x780")
+        self.root.title("Combat Vision Analytics")
+        self.root.geometry("1400x820")
 
-        self.video_path = None
         self.cap = None
+        self.total_frames = 0
+        self.frame_idx = 0
 
-        self.running = False
-        self.paused = True
+        self.playing = False
         self.processing_enabled = False
 
         self.playback_speed = 1.0
@@ -50,14 +50,22 @@ class CombatVisionGUI:
         self.filterer = FighterFilter()
         self.pose_extractor = PoseExtractor()
         self.defence_detector = DefenceDetector()
+        self.event_logger = EventLogger()
 
         self.identity_assigner = None
 
+        self.show_pose = True
+        self.show_boxes = True
+
         self._build_layout()
+
+        self.root.after(10, self._update_loop)
 
         self.root.mainloop()
 
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # GUI LAYOUT
+    # ------------------------------------------------
 
     def _build_layout(self):
 
@@ -75,13 +83,18 @@ class CombatVisionGUI:
 
         ttk.Button(controls, text="Load Video", command=self._load_video).pack(pady=5)
 
-        ttk.Button(controls, text="Play", command=self._play).pack(pady=5)
-        ttk.Button(controls, text="Pause", command=self._pause).pack(pady=5)
-        ttk.Button(controls, text="Stop", command=self._stop).pack(pady=5)
+        ttk.Separator(controls).pack(fill="x", pady=10)
 
-        ttk.Label(controls, text="Playback Speed").pack(pady=4)
+        ttk.Button(controls, text="Play", command=self._play).pack(pady=3)
+        ttk.Button(controls, text="Pause", command=self._pause).pack(pady=3)
+        ttk.Button(controls, text="Stop", command=self._stop).pack(pady=3)
+        ttk.Button(controls, text="Step Frame", command=self._step_frame).pack(pady=3)
 
-        self.speed_slider = tk.Scale(
+        ttk.Separator(controls).pack(fill="x", pady=10)
+
+        ttk.Label(controls, text="Playback Speed").pack()
+
+        self.speed = tk.Scale(
             controls,
             from_=0.25,
             to=2.0,
@@ -89,12 +102,46 @@ class CombatVisionGUI:
             orient="horizontal",
             command=self._set_speed
         )
-        self.speed_slider.set(1.0)
-        self.speed_slider.pack()
+
+        self.speed.set(1.0)
+        self.speed.pack()
+
+        ttk.Separator(controls).pack(fill="x", pady=10)
+
+        self.timeline = tk.Scale(
+            controls,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            command=self._seek_frame
+        )
+
+        self.timeline.pack(fill="x")
+
+        ttk.Separator(controls).pack(fill="x", pady=10)
+
+        ttk.Checkbutton(
+            controls,
+            text="Enable Processing",
+            command=self._toggle_processing
+        ).pack()
+
+        ttk.Checkbutton(
+            controls,
+            text="Show Pose",
+            command=lambda: setattr(self, "show_pose", not self.show_pose)
+        ).pack()
+
+        ttk.Checkbutton(
+            controls,
+            text="Show Boxes",
+            command=lambda: setattr(self, "show_boxes", not self.show_boxes)
+        ).pack()
 
         ttk.Separator(controls).pack(fill="x", pady=10)
 
         ttk.Label(controls, text="Fighter A Shorts").pack()
+
         self.combo_a = ttk.Combobox(
             controls,
             values=list(COLOUR_PALETTE.keys()),
@@ -103,6 +150,7 @@ class CombatVisionGUI:
         self.combo_a.pack()
 
         ttk.Label(controls, text="Fighter B Shorts").pack()
+
         self.combo_b = ttk.Combobox(
             controls,
             values=list(COLOUR_PALETTE.keys()),
@@ -113,10 +161,17 @@ class CombatVisionGUI:
         ttk.Button(
             controls,
             text="Enable Identity",
-            command=self._enable_processing
+            command=self._enable_identity
         ).pack(pady=6)
 
-    # --------------------------------------------------
+        ttk.Separator(controls).pack(fill="x", pady=10)
+
+        self.info_label = ttk.Label(controls, text="Frame: 0 | FPS: 0")
+        self.info_label.pack()
+
+    # ------------------------------------------------
+    # VIDEO LOAD
+    # ------------------------------------------------
 
     def _load_video(self):
 
@@ -127,60 +182,76 @@ class CombatVisionGUI:
         if not path:
             return
 
-        self._stop()
-
-        self.video_path = path
         self.cap = cv2.VideoCapture(path)
 
-        if not self.cap.isOpened():
-            print("Failed to open video.")
-            return
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        ret, frame = self.cap.read()
-
-        if ret:
-            self._update_canvas(frame)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.timeline.config(to=self.total_frames)
 
         self.combo_a.config(state="readonly")
         self.combo_b.config(state="readonly")
 
-        self.running = True
-        self.paused = True
+        self.frame_idx = 0
 
-        threading.Thread(
-            target=self._video_loop,
-            daemon=True
-        ).start()
+        self._read_frame()
 
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # PLAYBACK CONTROLS
+    # ------------------------------------------------
 
     def _play(self):
-        if self.running:
-            self.paused = False
+        self.playing = True
 
     def _pause(self):
-        self.paused = True
+        self.playing = False
 
     def _stop(self):
 
-        self.running = False
-        self.paused = True
+        self.playing = False
 
         if self.cap:
-            self.cap.release()
-            self.cap = None
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    def _set_speed(self, value):
-        self.playback_speed = float(value)
+        self.frame_idx = 0
 
-    # --------------------------------------------------
+    def _step_frame(self):
 
-    def _enable_processing(self):
+        self.playing = False
+        self._read_frame()
 
-        if not self.paused:
-            print("Pause video before enabling identity.")
+    def _set_speed(self, val):
+        self.playback_speed = float(val)
+
+    # ------------------------------------------------
+    # SEEK
+    # ------------------------------------------------
+
+    def _seek_frame(self, val):
+
+        if self.cap is None:
             return
+
+        frame = int(val)
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+
+        self.frame_idx = frame
+
+        self._read_frame()
+
+    # ------------------------------------------------
+    # PROCESSING TOGGLE
+    # ------------------------------------------------
+
+    def _toggle_processing(self):
+
+        self.processing_enabled = not self.processing_enabled
+
+    # ------------------------------------------------
+    # IDENTITY
+    # ------------------------------------------------
+
+    def _enable_identity(self):
 
         fighter_a = COLOUR_PALETTE[self.combo_a.get()]
         fighter_b = COLOUR_PALETTE[self.combo_b.get()]
@@ -190,136 +261,148 @@ class CombatVisionGUI:
             fighter_b
         )
 
-        self.processing_enabled = True
-
         print("Identity enabled.")
 
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # FRAME LOOP
+    # ------------------------------------------------
 
-    def _video_loop(self):
+    def _update_loop(self):
 
-        fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
+        if self.playing and self.cap:
 
-        while self.running and self.cap:
+            start = time.time()
 
-            if self.paused:
-                time.sleep(0.05)
-                continue
+            self._read_frame()
 
-            ret, frame = self.cap.read()
+            delay = max(1, int(1000 / (30 * self.playback_speed)))
 
-            if not ret:
-                break
+            elapsed = time.time() - start
 
-            if self.processing_enabled:
+            fps = 1.0 / max(elapsed, 0.001)
 
-                results = self.detector.track(
-                    source=frame,
-                    persist=True,
-                    conf=0.4,
-                    device=0,
-                    verbose=False
-                )[0]
+            self.info_label.config(
+                text=f"Frame: {self.frame_idx} | FPS: {fps:.1f}"
+            )
 
-                if results.boxes is not None and results.boxes.id is not None:
+        self.root.after(10, self._update_loop)
 
-                    boxes = results.boxes.xyxy.cpu().numpy()
-                    track_ids = results.boxes.id.cpu().numpy().astype(int)
+    # ------------------------------------------------
+    # READ FRAME
+    # ------------------------------------------------
 
-                    boxes, track_ids = self.filterer.filter(
-                        boxes,
-                        track_ids,
-                        frame.shape
-                    )
+    def _read_frame(self):
 
-                    identities = self.identity_assigner.assign(
-                        frame,
-                        boxes,
-                        track_ids
-                    )
+        if self.cap is None:
+            return
 
-                    poses = self.pose_extractor.extract(
-                        frame,
-                        boxes,
-                        track_ids
-                    )
+        ret, frame = self.cap.read()
 
-                    for box, tid, identity in zip(boxes, track_ids, identities):
+        if not ret:
+            return
 
-                        x1,y1,x2,y2 = map(int,box)
+        self.frame_idx += 1
 
-                        color = (0,255,255)
-                        label = "Unknown"
+        self.timeline.set(self.frame_idx)
 
-                        if identity == "A":
-                            color = (0,0,255)
-                            label = "Fighter A"
+        if self.processing_enabled:
 
-                        elif identity == "B":
-                            color = (255,0,0)
-                            label = "Fighter B"
+            frame = self._process_frame(frame)
 
-                        cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+        self._display(frame)
 
-                        cv2.putText(
+    # ------------------------------------------------
+    # PROCESS FRAME
+    # ------------------------------------------------
+
+    def _process_frame(self, frame):
+
+        results = self.detector.track(
+            source=frame,
+            persist=True,
+            conf=0.4,
+            device=0,
+            verbose=False
+        )[0]
+
+        if results.boxes is None or results.boxes.id is None:
+            return frame
+
+        boxes = results.boxes.xyxy.cpu().numpy()
+        track_ids = results.boxes.id.cpu().numpy().astype(int)
+
+        boxes, track_ids = self.filterer.filter(
+            boxes,
+            track_ids,
+            frame.shape
+        )
+
+        identities = self.identity_assigner.assign(
+            frame,
+            boxes,
+            track_ids
+        )
+
+        poses = self.pose_extractor.extract(
+            frame,
+            boxes,
+            track_ids
+        )
+
+        active_events = set()
+
+        for box, tid, identity in zip(boxes, track_ids, identities):
+
+            x1,y1,x2,y2 = map(int,box)
+
+            if self.show_boxes:
+
+                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+
+            pose = poses.get(tid)
+
+            if pose is not None and identity:
+
+                if self.show_pose:
+
+                    for kp in pose:
+                        cv2.circle(
                             frame,
-                            label,
-                            (x1,max(20,y1-10)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            color,
-                            2
+                            (int(kp[0]),int(kp[1])),
+                            3,
+                            (0,255,255),
+                            -1
                         )
 
-                        pose = poses.get(tid)
+                event = self.defence_detector.detect(pose, identity)
 
-                        if pose is not None and identity is not None:
+                if event:
 
-                            for kp in pose:
-                                cv2.circle(
-                                    frame,
-                                    (int(kp[0]),int(kp[1])),
-                                    3,
-                                    (0,255,0),
-                                    -1
-                                )
+                    active_events.add((identity,event))
 
-                            event = self.defence_detector.detect(
-                                pose,
-                                identity
-                            )
+                    self.event_logger.update(identity,event)
 
-                            if event == "Duck":
+                    cv2.putText(
+                        frame,
+                        event,
+                        (x1,y1-20),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0,255,255),
+                        2
+                    )
 
-                                cv2.rectangle(
-                                    frame,
-                                    (x1,y1),
-                                    (x2,y2),
-                                    (0,255,255),
-                                    4
-                                )
+        self.event_logger.finalize_inactive(active_events)
 
-                                cv2.putText(
-                                    frame,
-                                    "DUCK",
-                                    (x1,y1-40),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    1.0,
-                                    (0,255,255),
-                                    3
-                                )
+        return frame
 
-            self._update_canvas(frame)
+    # ------------------------------------------------
+    # DISPLAY
+    # ------------------------------------------------
 
-            time.sleep(1.0/(fps*self.playback_speed))
+    def _display(self, frame):
 
-        self.running = False
-
-    # --------------------------------------------------
-
-    def _update_canvas(self,frame):
-
-        frame = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         img = Image.fromarray(frame)
 
