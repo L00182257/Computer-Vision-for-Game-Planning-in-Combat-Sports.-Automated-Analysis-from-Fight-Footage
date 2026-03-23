@@ -16,9 +16,26 @@ class EventLogger:
         self.frame_idx = 0
 
 
-    def update_frame(self):
+    def update_frame(self, frame_idx=None):
 
-        self.frame_idx += 1
+        if frame_idx is not None:
+            self.frame_idx = frame_idx
+        else:
+            self.frame_idx += 1
+
+
+    def get_sequences(self):
+
+        sequences = {
+            "A": [],
+            "B": []
+        }
+
+        for e in sorted(self.events, key=lambda x: x["start_frame"]):
+            if e["fighter"] in sequences:
+                sequences[e["fighter"]].append(e["event"])
+
+        return list(sequences.values())
 
 
     def update(self, fighter_id, event_name):

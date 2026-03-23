@@ -4,10 +4,11 @@ from ultralytics import YOLO
 
 class PoseExtractor:
 
-    def __init__(self):
+    def __init__(self, device='cuda:0'):
 
         # Pose model
         self.model = YOLO("yolov8n-pose.pt")
+        self.model.to(device)
 
         # Last known pose for each track
         self.pose_memory = {}
