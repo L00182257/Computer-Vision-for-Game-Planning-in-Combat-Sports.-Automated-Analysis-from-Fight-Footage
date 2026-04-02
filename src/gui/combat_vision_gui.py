@@ -5,6 +5,10 @@ from PIL import Image, ImageTk
 import time
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from collections import defaultdict
+import json
 
 from ultralytics import YOLO
 
@@ -44,7 +48,7 @@ class CombatVisionGUI:
         self.frame_idx = 0
 
         self.playing = False
-        self.processing_enabled = False
+        self.processing_enabled = True  
 
         self.playback_speed = 1.0
 
@@ -71,8 +75,32 @@ class CombatVisionGUI:
 
         self.identity_assigner = None
 
+        self.selected_fighter_hsv = {
+            "A": COLOUR_PALETTE["Red"],
+            "B": COLOUR_PALETTE["Blue"]
+        }
+
+        self.selected_fighter_bgr = {
+            "A": self._hsv_to_bgr(self.selected_fighter_hsv["A"]),
+            "B": self._hsv_to_bgr(self.selected_fighter_hsv["B"])
+        }
+
+        self.short_picker_target = None
+        self.current_frame_orig = None
+
         self.show_pose = True
         self.show_boxes = True
+
+        # Round configuration
+        self.fps = 30.0
+        self.rounds_count = tk.IntVar(value=3)
+        self.round_duration_sec = tk.IntVar(value=180)
+        self.show_round_overlay = tk.BooleanVar(value=True)
+        self.selected_round_actions = tk.Variable(value="Block Duck Pull")
+
+        # Chart canvas reference
+        self.chart_canvas_tk = None
+        self.chart_figure = None
 
         self._build_layout()
 
@@ -83,6 +111,156 @@ class CombatVisionGUI:
     # ------------------------------------------------
     # GUI LAYOUT - TABBED INTERFACE
     # ------------------------------------------------
+
+    def _hsv_to_bgr(self, hsv):
+        h, s, v = hsv
+        hsv_pixel = np.uint8([[[h, s, v]]])
+        bgr_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2BGR)[0, 0]
+        return int(bgr_pixel[0]), int(bgr_pixel[1]), int(bgr_pixel[2])
+
+    def _set_fighter_color(self, fighter, hsv):
+        self.selected_fighter_hsv[fighter] = hsv
+        self.selected_fighter_bgr[fighter] = self._hsv_to_bgr(hsv)
+
+        # Keep combo in sync for user feedback
+        if fighter == "A":
+            self.combo_a.set(self._nearest_color_name(hsv))
+        else:
+            self.combo_b.set(self._nearest_color_name(hsv))
+
+        if self.identity_assigner is not None:
+            self.identity_assigner = FighterIdentity(
+                self.selected_fighter_hsv["A"],
+                self.selected_fighter_hsv["B"]
+            )
+
+    def _nearest_color_name(self, hsv):
+        # Find the closest COLOUR_PALETTE key by hue distance (circular) + saturation/value
+        h, s, v = hsv
+        best_name = None
+        best_dist = float('inf')
+        for name, (ph, ps, pv) in COLOUR_PALETTE.items():
+            dh = min(abs(ph - h), 180 - abs(ph - h))
+            ds = abs(ps - s)
+            dv = abs(pv - v)
+            dist = dh + ds * 0.2 + dv * 0.2
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+        return best_name
+
+    def _start_short_picker(self, fighter):
+        self.short_picker_target = fighter
+        messagebox.showinfo("Shorts Color Picker", f"Click on the video area to pick shorts color for Fighter {fighter}.")
+
+    def _on_canvas_click(self, event):
+        if self.short_picker_target is None or self.current_frame_orig is None:
+            return
+
+        frame_h, frame_w = self.current_frame_orig.shape[:2]
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w == 0 or canvas_h == 0:
+            return
+
+        fx = int(event.x * frame_w / canvas_w)
+        fy = int(event.y * frame_h / canvas_h)
+
+        if fx < 0 or fy < 0 or fx >= frame_w or fy >= frame_h:
+            return
+
+        bgr = self.current_frame_orig[fy, fx]
+        hsv = cv2.cvtColor(np.uint8([[bgr]]), cv2.COLOR_BGR2HSV)[0, 0]
+        self._set_fighter_color(self.short_picker_target, (int(hsv[0]), int(hsv[1]), int(hsv[2])))
+
+        messagebox.showinfo("Shorts Color Picker", f"Fighter {self.short_picker_target} color set by dropper.")
+        self.short_picker_target = None
+
+    def _compute_round_metrics(self, events, fps, round_duration_sec, max_rounds=None):
+        """Compute per-round action counts for both fighters."""
+        if fps <= 0 or round_duration_sec <= 0:
+            return {}, []
+
+        frames_per_round = fps * round_duration_sec
+        round_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+
+        for event in events:
+            start_frame = event.get("start_frame", 0)
+            fighter = event.get("fighter")
+            event_name = event.get("event")
+
+            round_idx = int(start_frame / frames_per_round)
+            if max_rounds and round_idx >= max_rounds:
+                continue
+
+            round_num = round_idx + 1
+            round_stats[fighter][round_num][event_name] += 1
+
+        # Build a clean dict with all rounds from 1 to max for both fighters
+        result = {"A": {}, "B": {}}
+        if events:
+            max_round = int(max(e.get("start_frame", 0) for e in events) / frames_per_round) + 1
+            if max_rounds:
+                max_round = min(max_round, max_rounds)
+            for fighter in ["A", "B"]:
+                for r in range(1, max_round + 1):
+                    result[fighter][r] = dict(round_stats[fighter].get(r, {}))
+
+        return result, list(range(1, len(result.get("A", {})) + 1))
+
+    def _get_round_from_frame(self, frame_idx):
+        """Convert frame index to round number."""
+        if self.fps <= 0 or self.round_duration_sec.get() <= 0:
+            return 1
+        frames_per_round = self.fps * self.round_duration_sec.get()
+        return int(frame_idx / frames_per_round) + 1
+
+    def _plot_round_metrics(self, round_stats, rounds):
+        """Create and display matplotlib figure with round-based metrics."""
+        if not rounds or not round_stats:
+            return
+
+        actions = self.selected_round_actions.get().split()
+
+        try:
+            if self.chart_figure:
+                plt.close(self.chart_figure)
+            if self.chart_canvas_tk:
+                self.chart_canvas_tk.get_tk_widget().destroy()
+
+            self.chart_figure, axes = plt.subplots(1, len(actions), figsize=(15, 4))
+            if len(actions) == 1:
+                axes = [axes]
+
+            for idx, action in enumerate(actions):
+                ax = axes[idx]
+
+                a_counts = [round_stats.get("A", {}).get(r, {}).get(action, 0) for r in rounds]
+                b_counts = [round_stats.get("B", {}).get(r, {}).get(action, 0) for r in rounds]
+
+                x = np.arange(len(rounds))
+                width = 0.35
+
+                ax.bar(x - width / 2, a_counts, width, label="Fighter A", color=self.selected_fighter_bgr["A"], alpha=0.8)
+                ax.bar(x + width / 2, b_counts, width, label="Fighter B", color=self.selected_fighter_bgr["B"], alpha=0.8)
+
+                ax.set_xlabel("Round")
+                ax.set_ylabel(f"{action} Count")
+                ax.set_title(f"{action} per Round")
+                ax.set_xticks(x)
+                ax.set_xticklabels(rounds)
+                ax.legend()
+                ax.grid(axis="y", alpha=0.3)
+
+            plt.tight_layout()
+
+            # Embed into Tkinter
+            self.chart_canvas_tk = FigureCanvasTkAgg(self.chart_figure, master=self.chart_frame)
+            self.chart_canvas_tk.draw()
+            self.chart_canvas_tk.get_tk_widget().pack(fill="both", expand=True)
+
+        except Exception as e:
+            print(f"Error plotting chart: {e}")
 
     def _build_layout(self):
 
@@ -120,6 +298,7 @@ class CombatVisionGUI:
 
         self.canvas = tk.Canvas(video_frame, bg="black")
         self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
 
         # Controls
         ttk.Button(controls, text="Load Video", command=self._load_video).pack(pady=5)
@@ -133,11 +312,11 @@ class CombatVisionGUI:
 
         ttk.Separator(controls).pack(fill="x", pady=10)
 
-        ttk.Label(controls, text="Playback Speed").pack()
+        ttk.Label(controls, text="Playback Speed (max 10x)").pack()
         self.speed = tk.Scale(
             controls,
             from_=0.25,
-            to=2.0,
+            to=10.0,
             resolution=0.25,
             orient="horizontal",
             command=self._set_speed
@@ -156,25 +335,36 @@ class CombatVisionGUI:
         )
         self.timeline.pack(fill="x")
 
+        frame_jump_frame = ttk.Frame(controls)
+        frame_jump_frame.pack(pady=5)
+        ttk.Label(frame_jump_frame, text="Go to frame:").pack(side="left")
+        self.frame_entry = ttk.Entry(frame_jump_frame, width=8)
+        self.frame_entry.pack(side="left", padx=4)
+        ttk.Button(frame_jump_frame, text="Go", command=self._jump_to_frame).pack(side="left")
+
         ttk.Separator(controls).pack(fill="x", pady=10)
 
-        ttk.Checkbutton(
-            controls,
-            text="Enable Processing",
-            command=self._toggle_processing
-        ).pack()
+        ttk.Label(controls, text="Processing: Enabled (always on)").pack(pady=2)
+        ttk.Label(controls, text="Pose Overlay: Enabled").pack(pady=2)
+        ttk.Label(controls, text="Bounding Boxes: Enabled").pack(pady=2)
 
-        ttk.Checkbutton(
-            controls,
-            text="Show Pose",
-            command=lambda: setattr(self, "show_pose", not self.show_pose)
-        ).pack()
+        ttk.Separator(controls).pack(fill="x", pady=10)
 
-        ttk.Checkbutton(
-            controls,
-            text="Show Boxes",
-            command=lambda: setattr(self, "show_boxes", not self.show_boxes)
-        ).pack()
+        ttk.Label(controls, text="Round Configuration", font=("Arial", 10, "bold")).pack()
+        
+        ttk.Label(controls, text="Number of Rounds:").pack()
+        rounds_spin = ttk.Spinbox(controls, from_=1, to=12, textvariable=self.rounds_count, width=8)
+        rounds_spin.pack()
+
+        ttk.Label(controls, text="Round Duration (sec):").pack()
+        duration_spin = ttk.Spinbox(controls, from_=30, to=600, textvariable=self.round_duration_sec, width=8)
+        duration_spin.pack()
+
+        ttk.Label(controls, text="FPS (auto-detected):").pack()
+        self.fps_label = ttk.Label(controls, text=f"{self.fps:.1f}")
+        self.fps_label.pack()
+
+        ttk.Checkbutton(controls, text="Show Round Overlay", variable=self.show_round_overlay).pack()
 
         ttk.Separator(controls).pack(fill="x", pady=10)
 
@@ -186,6 +376,12 @@ class CombatVisionGUI:
         )
         self.combo_a.pack()
 
+        ttk.Button(
+            controls,
+            text="Pick A Shorts from Frame",
+            command=lambda: self._start_short_picker("A")
+        ).pack(pady=2)
+
         ttk.Label(controls, text="Fighter B Shorts").pack()
         self.combo_b = ttk.Combobox(
             controls,
@@ -193,6 +389,12 @@ class CombatVisionGUI:
             state="disabled"
         )
         self.combo_b.pack()
+
+        ttk.Button(
+            controls,
+            text="Pick B Shorts from Frame",
+            command=lambda: self._start_short_picker("B")
+        ).pack(pady=2)
 
         ttk.Button(
             controls,
@@ -224,14 +426,22 @@ class CombatVisionGUI:
         self.insights_text = scrolledtext.ScrolledText(left, width=50, height=20)
         self.insights_text.pack()
 
-        # Right: Pattern visualization
+        # Right: Chart visualization
         right = ttk.Frame(main)
         right.pack(side="right", fill="both", expand=True)
 
-        ttk.Button(right, text="Mine Patterns", command=self._mine_patterns).pack(pady=5)
+        ttk.Label(right, text="Round-Based Metrics", font=("Arial", 10, "bold")).pack(pady=5)
+        
+        ttk.Label(right, text="Select actions:").pack()
+        action_frame = ttk.Frame(right)
+        action_frame.pack(pady=5)
+        actions = ["Block", "Duck", "Pull"]
+        for action in actions:
+            ttk.Checkbutton(action_frame, text=action, onvalue=action, offvalue="", 
+                          variable=tk.StringVar()).pack(anchor="w")
 
-        self.pattern_canvas = tk.Canvas(right, bg="white")
-        self.pattern_canvas.pack(fill="both", expand=True)
+        self.chart_frame = ttk.Frame(right)
+        self.chart_frame.pack(fill="both", expand=True)
 
     def _build_export_tab(self):
 
@@ -261,6 +471,11 @@ class CombatVisionGUI:
         self.cap = cv2.VideoCapture(path)
 
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0:
+            self.fps = 30.0
+
+        self.fps_label.config(text=f"{self.fps:.1f}")
 
         self.timeline.config(to=self.total_frames)
 
@@ -315,6 +530,26 @@ class CombatVisionGUI:
 
         self._read_frame()
 
+    def _jump_to_frame(self):
+
+        if self.cap is None:
+            return
+
+        try:
+            frame = int(self.frame_entry.get())
+        except ValueError:
+            messagebox.showerror("Invalid Frame", "Please enter a valid frame number.")
+            return
+
+        if frame < 0 or frame >= self.total_frames:
+            messagebox.showerror("Invalid Frame", "Frame number out of range.")
+            return
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+        self.frame_idx = frame
+        self.timeline.set(frame)
+        self._read_frame()
+
     # ------------------------------------------------
     # PROCESSING TOGGLE
     # ------------------------------------------------
@@ -329,12 +564,16 @@ class CombatVisionGUI:
 
     def _enable_identity(self):
 
-        fighter_a = COLOUR_PALETTE[self.combo_a.get()]
-        fighter_b = COLOUR_PALETTE[self.combo_b.get()]
+        if self.combo_a.get() not in COLOUR_PALETTE or self.combo_b.get() not in COLOUR_PALETTE:
+            messagebox.showerror("Identity", "Please select both Fighter A and Fighter B shorts colors.")
+            return
+
+        self._set_fighter_color("A", COLOUR_PALETTE[self.combo_a.get()])
+        self._set_fighter_color("B", COLOUR_PALETTE[self.combo_b.get()])
 
         self.identity_assigner = FighterIdentity(
-            fighter_a,
-            fighter_b
+            self.selected_fighter_hsv["A"],
+            self.selected_fighter_hsv["B"]
         )
 
         print("Identity enabled.")
@@ -349,7 +588,12 @@ class CombatVisionGUI:
 
             start = time.time()
 
-            self._read_frame()
+            # High-speed mode: read multiple frames per update for smoother fast playback
+            frames_to_advance = max(1, int(self.playback_speed))
+            for _ in range(frames_to_advance):
+                self._read_frame()
+                if not self.playing or self.cap is None:
+                    break
 
             delay = max(1, int(1000 / (30 * self.playback_speed)))
 
@@ -358,8 +602,11 @@ class CombatVisionGUI:
             fps = 1.0 / max(elapsed, 0.001)
 
             self.info_label.config(
-                text=f"Frame: {self.frame_idx} | FPS: {fps:.1f}"
+                text=f"Frame: {self.frame_idx} | FPS: {fps:.1f} | Speed: {self.playback_speed:.2f}x"
             )
+
+            # Avoid unnecessary CPU spin when running at slow speed
+            time.sleep(delay / 1000.0)
 
         self.root.after(10, self._update_loop)
 
@@ -376,6 +623,8 @@ class CombatVisionGUI:
 
         if not ret:
             return
+
+        self.current_frame_orig = frame.copy()
 
         self.frame_idx += 1
         self.event_logger.update_frame(self.frame_idx)
@@ -430,13 +679,47 @@ class CombatVisionGUI:
 
         active_events = set()
 
+        pose_by_identity = {i: p for (b, t, i), p in zip(zip(boxes, track_ids, identities), [poses.get(t) for t in track_ids]) if i in ("A", "B")}
+
+        # Draw round overlay
+        if self.show_round_overlay.get():
+            round_num = self._get_round_from_frame(self.frame_idx)
+            round_text = f"Round {round_num}"
+            
+            # Get action counts for current round
+            round_stats, rounds = self._compute_round_metrics(
+                self.event_logger.events,
+                self.fps,
+                self.round_duration_sec.get(),
+                max_rounds=self.rounds_count.get()
+            )
+            
+            if round_num in rounds:
+                a_actions = round_stats.get("A", {}).get(round_num, {})
+                b_actions = round_stats.get("B", {}).get(round_num, {})
+                round_text += f"\nA: " + ", ".join([f"{a}={c}" for a, c in a_actions.items()]) if a_actions else "A: -"
+                round_text += f"\nB: " + ", ".join([f"{a}={c}" for a, c in b_actions.items()]) if b_actions else "B: -"
+            
+            # Draw semi-transparent overlay background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (10, 10), (350, 100), (0, 0, 0), -1)
+            frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+            
+            # Draw text
+            y_offset = 30
+            for line in round_text.split('\n'):
+                cv2.putText(frame, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                y_offset += 25
+
         for box, tid, identity in zip(boxes, track_ids, identities):
 
             x1,y1,x2,y2 = map(int,box)
 
+            draw_color = self.selected_fighter_bgr.get(identity, (0,255,0))
+
             if self.show_boxes:
 
-                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                cv2.rectangle(frame,(x1,y1),(x2,y2),draw_color,2)
 
             pose = poses.get(tid)
 
@@ -453,7 +736,11 @@ class CombatVisionGUI:
                             -1
                         )
 
-                event = self.defence_detector.detect(pose, identity)
+                opponent_id = "B" if identity == "A" else "A"
+                opponent_pose = pose_by_identity.get(opponent_id)
+
+                block_event = self.defence_detector.detect_block(pose, opponent_pose)
+                event = block_event or self.defence_detector.detect(pose, identity)
 
                 if event:
 
@@ -467,7 +754,7 @@ class CombatVisionGUI:
                         (x1,y1-20),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.9,
-                        (0,255,255),
+                        draw_color,
                         2
                     )
 
@@ -525,8 +812,33 @@ class CombatVisionGUI:
                 text += "  None\n"
             text += "\n"
 
+        # Compute round-based metrics
+        round_stats, rounds = self._compute_round_metrics(
+            self.event_logger.events,
+            self.fps,
+            self.round_duration_sec.get(),
+            max_rounds=self.rounds_count.get()
+        )
+
+        if rounds:
+            text += f"\n--- Round-by-Round Summary ---\n"
+            for round_num in rounds:
+                text += f"\nRound {round_num}:\n"
+                for fighter in ["A", "B"]:
+                    actions = round_stats.get(fighter, {}).get(round_num, {})
+                    text += f"  {fighter}: "
+                    if actions:
+                        text += ", ".join([f"{a}={c}" for a, c in actions.items()])
+                    else:
+                        text += "No actions"
+                    text += "\n"
+
         self.insights_text.delete(1.0, tk.END)
         self.insights_text.insert(tk.END, text)
+
+        # Plot chart
+        if round_stats:
+            self._plot_round_metrics(round_stats, rounds)
 
     def _mine_patterns(self):
 
@@ -573,6 +885,22 @@ class CombatVisionGUI:
             return
 
         insights = self.coach_insights.summarize_events(self.event_logger)
+        
+        # Include round-based metrics
+        round_stats, rounds = self._compute_round_metrics(
+            self.event_logger.events,
+            self.fps,
+            self.round_duration_sec.get(),
+            max_rounds=self.rounds_count.get()
+        )
+        
+        insights["round_data"] = {
+            "rounds": rounds,
+            "stats": round_stats,
+            "fps": self.fps,
+            "round_duration_sec": self.round_duration_sec.get()
+        }
+        
         self.coach_insights.export_json(insights, path)
         self.export_status.config(text=f"Insights exported to {path}")
 
@@ -668,12 +996,49 @@ class CombatVisionGUI:
 
         active_events = set()
 
+        pose_by_identity = {}
+        for box, tid, identity in zip(boxes, track_ids, identities):
+            if identity in ("A", "B") and poses.get(tid) is not None:
+                pose_by_identity[identity] = poses.get(tid)
+
+        # Draw round overlay
+        if self.show_round_overlay.get():
+            round_num = self._get_round_from_frame(self.frame_idx)
+            round_text = f"Round {round_num}"
+            
+            # Get action counts for current round
+            round_stats, rounds = self._compute_round_metrics(
+                self.event_logger.events,
+                self.fps,
+                self.round_duration_sec.get(),
+                max_rounds=self.rounds_count.get()
+            )
+            
+            if round_num in rounds:
+                a_actions = round_stats.get("A", {}).get(round_num, {})
+                b_actions = round_stats.get("B", {}).get(round_num, {})
+                round_text += f"\nA: " + ", ".join([f"{a}={c}" for a, c in a_actions.items()]) if a_actions else "A: -"
+                round_text += f"\nB: " + ", ".join([f"{a}={c}" for a, c in b_actions.items()]) if b_actions else "B: -"
+            
+            # Draw semi-transparent overlay background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (10, 10), (350, 100), (0, 0, 0), -1)
+            frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+            
+            # Draw text
+            y_offset = 30
+            for line in round_text.split('\n'):
+                cv2.putText(frame, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                y_offset += 25
+
         for box, tid, identity in zip(boxes, track_ids, identities):
 
             x1, y1, x2, y2 = map(int, box)
 
+            draw_color = self.selected_fighter_bgr.get(identity, (0, 255, 0))
+
             if self.show_boxes:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), draw_color, 2)
 
             pose = poses.get(tid)
 
@@ -688,7 +1053,11 @@ class CombatVisionGUI:
                             -1
                         )
 
-                event = self.defence_detector.detect(pose, identity)
+                opponent_id = "B" if identity == "A" else "A"
+                opponent_pose = pose_by_identity.get(opponent_id)
+
+                block_event = self.defence_detector.detect_block(pose, opponent_pose)
+                event = block_event or self.defence_detector.detect(pose, identity)
 
                 if event:
                     active_events.add((identity, event))
@@ -700,7 +1069,7 @@ class CombatVisionGUI:
                         (x1, y1 - 20),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.9,
-                        (0, 255, 255),
+                        draw_color,
                         2
                     )
 

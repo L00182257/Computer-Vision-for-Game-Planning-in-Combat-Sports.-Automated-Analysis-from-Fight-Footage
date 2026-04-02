@@ -4,7 +4,7 @@ from ultralytics import YOLO
 
 class PoseExtractor:
 
-    def __init__(self, device='cuda:0'):
+    def __init__(self, device='cuda:1'):
 
         # Pose model
         self.model = YOLO("yolov8n-pose.pt")

@@ -7,15 +7,15 @@ class DefenceDetector:
     def __init__(self):
 
         # --- thresholds ---
-        self.duck_ratio = 1.6  # reverted
-        self.slip_offset = 0.3  # increased for less sensitivity
-        self.pull_threshold = 0.25  # increased for less sensitivity
+        self.duck_ratio = 1.8  
+        #self.slip_offset = 0.3  
+        self.pull_threshold = 0.25  
 
         # frames required to confirm
-        self.required_frames = 5  # keep higher
+        self.required_frames = 4 
 
         # cooldown to prevent spam
-        self.cooldown_frames = 15  # keep higher
+        self.cooldown_frames = 28  
 
         # fighter state
         self.counters = {"A": 0, "B": 0}
@@ -38,7 +38,70 @@ class DefenceDetector:
         return True
 
 
+    def detect_block(self, defender_pose, attacker_pose):
+        """Detect block when defender and attacker gloves (wrists) come into contact.
+
+        Conditions:
+        - Both poses valid.
+        - Defender wrist and attacker wrist are within a tight threshold.
+        - Defender wrist is near defender's head/shoulder area (indicating a defensive block position).
+        - This is intentionally conservative (err on side of caution).
+        """
+        if not self._is_pose_valid(defender_pose) or not self._is_pose_valid(attacker_pose):
+            return None
+
+        d_nose = defender_pose[0]
+        d_l_shoulder = defender_pose[5]
+        d_r_shoulder = defender_pose[6]
+        d_l_wrist = defender_pose[9]
+        d_r_wrist = defender_pose[10]
+
+        a_l_wrist = attacker_pose[9]
+        a_r_wrist = attacker_pose[10]
+
+        shoulder_mid = (d_l_shoulder + d_r_shoulder) / 2
+        torso_height = np.linalg.norm(shoulder_mid - ((defender_pose[11] + defender_pose[12]) / 2))
+        if torso_height <= 0:
+            return None
+
+        # requirement: two gloves are close enough (contact)
+        contact_threshold = max(50.0, torso_height * 0.25)
+
+        def _dist(p, q):
+            return np.linalg.norm(np.array(p) - np.array(q))
+
+        contacts = [
+            _dist(d_l_wrist, a_l_wrist),
+            _dist(d_l_wrist, a_r_wrist),
+            _dist(d_r_wrist, a_l_wrist),
+            _dist(d_r_wrist, a_r_wrist),
+        ]
+        matched = [d for d in contacts if d <= contact_threshold]
+
+        if not matched:
+            return None
+
+        # defender wrist should be placed near own head/upper-chest area
+        face_region_threshold = max(20.0, torso_height * 0.25)
+        if (_dist(d_l_wrist, d_nose) < face_region_threshold or
+            _dist(d_r_wrist, d_nose) < face_region_threshold or
+            _dist(d_l_wrist, shoulder_mid) < face_region_threshold or
+            _dist(d_r_wrist, shoulder_mid) < face_region_threshold):
+            return "Block"
+
+        return None
+
+
     def detect(self, keypoints, fighter_id):
+        """Detect single-fighter defensive actions, excluding block (handled by detect_block).
+
+        Actions covered:
+        - Duck: lower height quickly (head-to-knee ratio drops) with downward movement.
+        - Slip Left/Right: lateral head offset with stable vertical position and neutral torso.
+        - Pull: retracting body quickly backwards (negative vertical velocity) as counter-defence.
+
+        This method is intended as a conservative fallback when block is not present.
+        """
 
         if not self._is_pose_valid(keypoints):
             return None
@@ -95,23 +158,18 @@ class DefenceDetector:
         event = None
 
         # -------------------------------------------------
-        # Duck (reverted to original logic)
+        # Duck
         # -------------------------------------------------
-        if ratio < 1.6 and torso_angle > 30 and velocity_y > 2:
+        if ratio < 1.8 and torso_angle > 30 and velocity_y > 2:
             event = "Duck"
 
         # -------------------------------------------------
-        # Slip Left / Right (less sensitive)
+        # Slip Left / Right
         # -------------------------------------------------
-        elif (head_offset < -self.slip_offset and  # increased threshold
-              abs(velocity_y) < 2 and  # stricter vertical movement
-              torso_angle < 25):  # more upright
-            event = "Slip Left"
-
-        elif (head_offset > self.slip_offset and  # increased threshold
-              abs(velocity_y) < 2 and
-              torso_angle < 25):
-            event = "Slip Right"
+        #elif (head_offset < -self.slip_offset and  # increased threshold
+         #     abs(velocity_y) < 2 and  # stricter vertical movement
+         #     torso_angle < 25):  # more upright
+         #   event = "Slip Left"
 
         # -------------------------------------------------
         # Pull (less sensitive)
@@ -120,18 +178,12 @@ class DefenceDetector:
             event = "Pull"
 
         # -------------------------------------------------
-        # Shoulder Roll Left / Right
+        # Simplified defense list: remove bobbing/weaving and complex rolls
         # -------------------------------------------------
-        elif (abs(head_offset) > 0.22 and
-              torso_angle > 25 and
-              (l_wrist[1] < shoulder_mid[1] or r_wrist[1] < shoulder_mid[1])):
-            if head_offset < 0:
-                event = "Shoulder Roll Left"
-            else:
-                event = "Shoulder Roll Right"
+        # (Shoulder roll and complex moves removed for stability and coach-focus)
 
         # -------------------------------------------------
-        # Blocking commented out
+        # Blocking handled separately in detect_block for more direct glove contact detection, so removed these more heuristic block detections
         # -------------------------------------------------
         # elif (l_wrist[1] < nose[1] - self.block_high_threshold * torso_height and
         #       r_wrist[1] < nose[1] - self.block_high_threshold * torso_height and
