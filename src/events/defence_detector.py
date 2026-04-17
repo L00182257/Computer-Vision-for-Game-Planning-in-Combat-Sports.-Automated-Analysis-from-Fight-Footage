@@ -7,7 +7,7 @@ class DefenceDetector:
     def __init__(self):
 
         # --- thresholds ---
-        self.duck_ratio = 1.8  
+        self.duck_ratio = 2.8  
         #self.slip_offset = 0.3  
         self.pull_threshold = 0.25  
 
@@ -155,27 +155,33 @@ class DefenceDetector:
             self.cooldowns[fighter_id] -= 1
             return None
 
-        event = None
+        # Multi-action detection: Duck and Pull should both be possible
+        duck = (ratio < 2.2 and torso_angle > 15 and velocity_y > 0.7)
+        # pull = (velocity_y < -self.pull_threshold * torso_height)  # DISABLED
 
-        # -------------------------------------------------
-        # Duck
-        # -------------------------------------------------
-        if ratio < 1.8 and torso_angle > 30 and velocity_y > 2:
-            event = "Duck"
+        # Protect against repeated rapid triggers
+        if self.cooldowns[fighter_id] > 0:
+            self.cooldowns[fighter_id] -= 1
+            return None
 
-        # -------------------------------------------------
-        # Slip Left / Right
-        # -------------------------------------------------
-        #elif (head_offset < -self.slip_offset and  # increased threshold
-         #     abs(velocity_y) < 2 and  # stricter vertical movement
-         #     torso_angle < 25):  # more upright
-         #   event = "Slip Left"
+        events = []
+        if duck:
+            events.append("Duck")
+        # if pull:  # DISABLED
+        #     events.append("Pull")
 
-        # -------------------------------------------------
-        # Pull (less sensitive)
-        # -------------------------------------------------
-        elif velocity_y < -self.pull_threshold * torso_height:  # stricter velocity
-            event = "Pull"
+        if not events:
+            self.counters[fighter_id] = 0
+            return None
+
+        self.counters[fighter_id] += 1
+        if self.counters[fighter_id] < self.required_frames:
+            return None
+
+        self.counters[fighter_id] = 0
+        self.cooldowns[fighter_id] = self.cooldown_frames
+
+        return events
 
         # -------------------------------------------------
         # Simplified defense list: remove bobbing/weaving and complex rolls

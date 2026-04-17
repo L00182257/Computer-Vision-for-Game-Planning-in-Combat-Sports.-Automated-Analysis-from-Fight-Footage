@@ -432,16 +432,134 @@ class CombatVisionGUI:
 
         ttk.Label(right, text="Round-Based Metrics", font=("Arial", 10, "bold")).pack(pady=5)
         
+        # Action selection (stored variables)
+        self.action_block_var = tk.BooleanVar(value=True)
+        self.action_duck_var = tk.BooleanVar(value=True)
+        self.action_pull_var = tk.BooleanVar(value=False)
+        
         ttk.Label(right, text="Select actions:").pack()
         action_frame = ttk.Frame(right)
         action_frame.pack(pady=5)
-        actions = ["Block", "Duck", "Pull"]
-        for action in actions:
-            ttk.Checkbutton(action_frame, text=action, onvalue=action, offvalue="", 
-                          variable=tk.StringVar()).pack(anchor="w")
+        ttk.Checkbutton(action_frame, text="Block", variable=self.action_block_var).pack(anchor="w")
+        ttk.Checkbutton(action_frame, text="Duck", variable=self.action_duck_var).pack(anchor="w")
+        ttk.Checkbutton(action_frame, text="Pull", variable=self.action_pull_var).pack(anchor="w")
+
+        # Chart type selector
+        ttk.Label(right, text="Chart type:").pack()
+        chart_type_frame = ttk.Frame(right)
+        chart_type_frame.pack(pady=5)
+        self.chart_type_var = tk.StringVar(value="bar")
+        ttk.Radiobutton(chart_type_frame, text="Bar Chart", variable=self.chart_type_var, value="bar").pack(anchor="w")
+        ttk.Radiobutton(chart_type_frame, text="Line Graph", variable=self.chart_type_var, value="line").pack(anchor="w")
+
+        # Render button
+        ttk.Button(right, text="Render Chart", command=self._render_coach_chart).pack(pady=5)
 
         self.chart_frame = ttk.Frame(right)
         self.chart_frame.pack(fill="both", expand=True)
+
+    def _render_coach_chart(self):
+        """Render selected chart type with selected actions."""
+        round_stats, rounds = self._compute_round_metrics(
+            self.event_logger.events,
+            self.fps,
+            self.round_duration_sec.get(),
+            max_rounds=self.rounds_count.get()
+        )
+
+        if not rounds or not round_stats:
+            messagebox.showinfo("Chart", "No round data available yet.")
+            return
+
+        # Collect selected actions
+        selected_actions = []
+        if self.action_block_var.get():
+            selected_actions.append("Block")
+        if self.action_duck_var.get():
+            selected_actions.append("Duck")
+        if self.action_pull_var.get():
+            selected_actions.append("Pull")
+
+        if not selected_actions:
+            messagebox.showwarning("Chart", "Please select at least one action.")
+            return
+
+        chart_type = self.chart_type_var.get()
+
+        try:
+            if self.chart_figure:
+                plt.close(self.chart_figure)
+            if self.chart_canvas_tk:
+                self.chart_canvas_tk.get_tk_widget().destroy()
+
+            if chart_type == "bar":
+                self._plot_bar_chart(round_stats, rounds, selected_actions)
+            elif chart_type == "line":
+                self._plot_line_chart(round_stats, rounds, selected_actions)
+
+        except Exception as e:
+            messagebox.showerror("Chart Error", f"Failed to render chart: {e}")
+
+    def _plot_bar_chart(self, round_stats, rounds, actions):
+        """Bar chart: actions per round, grouped by fighter."""
+        self.chart_figure, axes = plt.subplots(1, len(actions), figsize=(15, 4))
+        if len(actions) == 1:
+            axes = [axes]
+
+        for idx, action in enumerate(actions):
+            ax = axes[idx]
+
+            a_counts = [round_stats.get("A", {}).get(r, {}).get(action, 0) for r in rounds]
+            b_counts = [round_stats.get("B", {}).get(r, {}).get(action, 0) for r in rounds]
+
+            x = np.arange(len(rounds))
+            width = 0.35
+
+            ax.bar(x - width / 2, a_counts, width, label="Fighter A", color=self.selected_fighter_bgr["A"], alpha=0.8)
+            ax.bar(x + width / 2, b_counts, width, label="Fighter B", color=self.selected_fighter_bgr["B"], alpha=0.8)
+
+            ax.set_xlabel("Round")
+            ax.set_ylabel(f"{action} Count")
+            ax.set_title(f"{action} per Round")
+            ax.set_xticks(x)
+            ax.set_xticklabels(rounds)
+            ax.legend()
+            ax.grid(axis="y", alpha=0.3)
+
+        plt.tight_layout()
+
+        self.chart_canvas_tk = FigureCanvasTkAgg(self.chart_figure, master=self.chart_frame)
+        self.chart_canvas_tk.draw()
+        self.chart_canvas_tk.get_tk_widget().pack(fill="both", expand=True)
+
+    def _plot_line_chart(self, round_stats, rounds, actions):
+        """Line graph: action trends across rounds for each fighter."""
+        self.chart_figure, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        for action in actions:
+            a_counts = [round_stats.get("A", {}).get(r, {}).get(action, 0) for r in rounds]
+            b_counts = [round_stats.get("B", {}).get(r, {}).get(action, 0) for r in rounds]
+
+            ax1.plot(rounds, a_counts, marker="o", label=action, linewidth=2)
+            ax2.plot(rounds, b_counts, marker="s", label=action, linewidth=2)
+
+        ax1.set_title("Fighter A - Action Trends")
+        ax1.set_xlabel("Round")
+        ax1.set_ylabel("Count")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        ax2.set_title("Fighter B - Action Trends")
+        ax2.set_xlabel("Round")
+        ax2.set_ylabel("Count")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        self.chart_canvas_tk = FigureCanvasTkAgg(self.chart_figure, master=self.chart_frame)
+        self.chart_canvas_tk.draw()
+        self.chart_canvas_tk.get_tk_widget().pack(fill="both", expand=True)
 
     def _build_export_tab(self):
 
@@ -740,18 +858,29 @@ class CombatVisionGUI:
                 opponent_pose = pose_by_identity.get(opponent_id)
 
                 block_event = self.defence_detector.detect_block(pose, opponent_pose)
-                event = block_event or self.defence_detector.detect(pose, identity)
+                def_events = self.defence_detector.detect(pose, identity)
 
-                if event:
+                all_events = []
+                if block_event:
+                    all_events.append(block_event)
+                if def_events:
+                    if isinstance(def_events, list):
+                        all_events.extend(def_events)
+                    else:
+                        all_events.append(def_events)
 
-                    active_events.add((identity,event))
+                if all_events:
+                    active_events.update((identity, e) for e in all_events)
 
-                    self.event_logger.update(identity,event)
+                    for e in all_events:
+                        self.event_logger.update(identity, e)
+
+                    event_text = ", ".join(all_events)
 
                     cv2.putText(
                         frame,
-                        event,
-                        (x1,y1-20),
+                        event_text,
+                        (x1, y1 - 20),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.9,
                         draw_color,
@@ -759,7 +888,7 @@ class CombatVisionGUI:
                     )
 
                     # Update real-time event feed
-                    self.event_feed.insert(tk.END, f"Frame {self.frame_idx}: {identity} - {event}\n")
+                    self.event_feed.insert(tk.END, f"Frame {self.frame_idx}: {identity} - {event_text}\n")
                     self.event_feed.see(tk.END)
 
         self.event_logger.finalize_inactive(active_events)
@@ -1057,15 +1186,28 @@ class CombatVisionGUI:
                 opponent_pose = pose_by_identity.get(opponent_id)
 
                 block_event = self.defence_detector.detect_block(pose, opponent_pose)
-                event = block_event or self.defence_detector.detect(pose, identity)
+                def_events = self.defence_detector.detect(pose, identity)
 
-                if event:
-                    active_events.add((identity, event))
-                    self.event_logger.update(identity, event)
+                all_events = []
+                if block_event:
+                    all_events.append(block_event)
+                if def_events:
+                    if isinstance(def_events, list):
+                        all_events.extend(def_events)
+                    else:
+                        all_events.append(def_events)
+
+                if all_events:
+                    active_events.update((identity, e) for e in all_events)
+
+                    for e in all_events:
+                        self.event_logger.update(identity, e)
+
+                    event_text = ", ".join(all_events)
 
                     cv2.putText(
                         frame,
-                        event,
+                        event_text,
                         (x1, y1 - 20),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.9,
