@@ -41,6 +41,9 @@ desktop.ini
 *.avi
 *.mov
 *.mkv
+*.csv
+*.json
+*.xml
 
 # Model weights & caches
 *.pt
