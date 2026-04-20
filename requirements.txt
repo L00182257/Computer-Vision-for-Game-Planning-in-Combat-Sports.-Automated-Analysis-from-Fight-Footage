@@ -16,3 +16,6 @@ mediapipe>=0.10
 
 # Pattern mining
 prefixspan>=0.5
+
+# Visualization
+matplotlib>=3.5
